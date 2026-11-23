@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
-
+from app.errors import KeitaroError
 from app.db import get_db
 from app.main import app
 from app.keitaro.client import get_keitaro
@@ -16,6 +16,9 @@ class FakeKeitaro:
         self.streams = []
         self.created_campaigns = []
         self.next_stream_id = 100
+        self.create_stream_calls = 0
+        self.fail_create_stream_at = None
+        self.fail_get_campaign = False
 
     async def offers(self):
         return [{"id": 10, "name": "Test offer"}]
@@ -37,6 +40,9 @@ class FakeKeitaro:
         return self.streams
 
     async def create_stream(self, payload):
+        self.create_stream_calls += 1
+        if self.create_stream_calls == self.fail_create_stream_at:
+            raise KeitaroError("Test stream creation failure")
         self.next_stream_id += 1
         stream = {
             **payload,
@@ -56,7 +62,14 @@ class FakeKeitaro:
         return {"id": stream_id, **payload}
 
     async def get_campaign(self, campaign_id):
-        return {"id": campaign_id, "name": "Imported campaign", "alias": "imported"}
+        if self.fail_get_campaign:
+            raise KeitaroError("Test sync failure")
+
+        return {
+        "id": campaign_id,
+        "name": "Imported campaign",
+        "alias": "imported",
+    }
 
 
 @pytest.fixture
@@ -167,3 +180,86 @@ def test_import_campaign_success(api):
     assert data["keitaro_campaign_id"] == 777
     assert data["name"] == "Imported campaign"
     assert data["streams"] == []
+
+
+def test_create_campaign_geo_stream_failure_preserves_campaign(api):
+    client, fake = api
+    fake.fail_create_stream_at = 1
+
+    response = client.post(
+        "/api/campaigns",
+        json={
+            "name": "Partial GEO failure",
+            "geo": "AU",
+            "offer_id": 10,
+            "domain_id": 20,
+            "group_id": 30,
+            "traffic_source_id": 40,
+        },
+    )
+
+    assert response.status_code == 502
+    assert "Кампания #900 создана" in response.json()["detail"]
+    assert len(fake.created_campaigns) == 1
+    assert len(fake.streams) == 0
+
+    campaigns = client.get("/api/campaigns").json()
+    assert len(campaigns) == 1
+    assert campaigns[0]["keitaro_campaign_id"] == 900
+
+
+def test_create_campaign_default_stream_failure_preserves_geo(api):
+    client, fake = api
+    fake.fail_create_stream_at = 2
+
+    response = client.post(
+        "/api/campaigns",
+        json={
+            "name": "Partial default failure",
+            "geo": "AU",
+            "offer_id": 10,
+            "domain_id": 20,
+            "group_id": 30,
+            "traffic_source_id": 40,
+        },
+    )
+
+    assert response.status_code == 502
+    assert "Кампания #900 создана" in response.json()["detail"]
+    assert len(fake.created_campaigns) == 1
+    assert len(fake.streams) == 1
+    assert fake.streams[0]["name"] == "GEO AU"
+
+    campaigns = client.get("/api/campaigns").json()
+    assert len(campaigns) == 1
+    assert campaigns[0]["keitaro_campaign_id"] == 900
+
+
+def test_create_campaign_sync_failure_can_be_recovered(api):
+    client, fake = api
+    fake.fail_get_campaign = True
+
+    response = client.post(
+        "/api/campaigns",
+        json={
+            "name": "Sync failure",
+            "geo": "AU",
+            "offer_id": 10,
+            "domain_id": 20,
+            "group_id": 30,
+            "traffic_source_id": 40,
+        },
+    )
+
+    assert response.status_code == 502
+    assert len(fake.streams) == 2
+
+    campaigns = client.get("/api/campaigns").json()
+    assert len(campaigns) == 1
+
+    fake.fail_get_campaign = False
+
+    recovered = client.get("/api/campaigns/1?refresh=true")
+
+    assert recovered.status_code == 200
+    assert len(recovered.json()["streams"]) == 2
