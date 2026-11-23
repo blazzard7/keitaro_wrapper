@@ -3,7 +3,7 @@ import pytest
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
-
+from app.errors import DomainError, NotFoundError
 from app.models import (
     Base,
     Campaign,
@@ -12,7 +12,6 @@ from app.models import (
     StreamOffer,
     StreamOfferHistory,
 )
-from app.errors import DomainError
 from app.services.drafts import (
     add_offer,
     remove_offer,
@@ -20,6 +19,7 @@ from app.services.drafts import (
     set_pin,
     cancel,
 )
+
 
 
 def make_drafts_db():
@@ -364,6 +364,72 @@ def test_cannot_modify_remote_deleted_stream():
 
     with pytest.raises(DomainError):
         add_offer(db, stream.id, 1003)
+
+    db.close()
+    engine.dispose()
+
+def test_cannot_remove_offer_not_bound_to_stream():
+    engine, db, campaign, stream, offer1, offer2, offer3, b1, b2 = (
+        make_drafts_db()
+    )
+
+    with pytest.raises(NotFoundError):
+        remove_offer(db, stream.id, 9999)
+
+    db.close()
+    engine.dispose()
+
+def test_cannot_modify_redirect_stream():
+    engine, db, campaign, stream, offer1, offer2, offer3, b1, b2 = (
+        make_drafts_db()
+    )
+
+    stream.schema = "redirect"
+    stream.bindings.clear()
+    db.commit()
+
+    with pytest.raises(DomainError, match="не содержит офферов"):
+        add_offer(db, stream.id, 1003)
+
+    db.close()
+    engine.dispose()
+
+def test_cannot_add_offer_missing_from_catalog():
+    engine, db, campaign, stream, offer1, offer2, offer3, b1, b2 = make_drafts_db()
+
+    with pytest.raises(NotFoundError, match="Обновите каталог"):
+        add_offer(db, stream.id, 9999)
+
+    db.close()
+    engine.dispose()
+def test_add_offer_restores_archived_binding():
+    engine, db, campaign, stream, offer1, offer2, offer3, b1, b2 = make_drafts_db()
+
+    remove_offer(db, stream.id, 1001)
+
+    add_offer(db, stream.id, 1001)
+
+    db.refresh(b1)
+
+    assert b1.draft_state == "active"
+    assert b1.draft_share == 50
+
+    history = get_history(db, stream.id)
+    assert [h.action for h in history] == ["remove", "restore"]
+
+    db.close()
+    engine.dispose()
+def test_cannot_pin_removed_offer():
+    engine, db, campaign, stream, offer1, offer2, offer3, b1, b2 = make_drafts_db()
+
+    remove_offer(db, stream.id, 1001)
+
+    with pytest.raises(DomainError, match="Нельзя закрепить удалённый оффер"):
+        set_pin(db, stream.id, 1001, True, 50)
+
+    db.refresh(b1)
+    assert b1.draft_state == "removed"
+    assert b1.is_pinned is False
 
     db.close()
     engine.dispose()

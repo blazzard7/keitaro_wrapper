@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
-
+from app.keitaro.client import get_keitaro
 from app.db import get_db
 from app.main import app
 from app.models import Base, Campaign, Offer, Stream, StreamOffer
@@ -200,3 +200,62 @@ def test_invalid_pin_payload(api):
     )
 
     assert response.status_code == 422
+
+
+def test_publish_stream_endpoint(api):
+    client, stream_id = api
+
+    class FakeKeitaro:
+        async def update_stream(self, keitaro_stream_id, payload):
+            assert keitaro_stream_id == 101
+            assert len(payload["offers"]) == 2
+
+            return {
+                "offers": [
+                    {"id": 901, "offer_id": 1001},
+                    {"id": 902, "offer_id": 1002},
+                ]
+            }
+
+    app.dependency_overrides[get_keitaro] = lambda: FakeKeitaro()
+
+    try:
+        # Меняем долю, чтобы поток стал dirty.
+        pin_response = client.put(
+            f"/api/streams/{stream_id}/offers/1001/pin",
+            json={"pinned": True, "share": 60},
+        )
+        assert pin_response.status_code == 200
+
+        response = client.post(
+            f"/api/streams/{stream_id}/publish"
+        )
+
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["status"] == "published"
+        assert data["stream"]["offers"]
+
+        published = {
+            offer["offer_id"]: offer
+            for offer in data["stream"]["offers"]
+        }
+
+        assert published[1001]["published_share"] == 60
+        assert published[1002]["published_share"] == 40
+
+    finally:
+        app.dependency_overrides.pop(get_keitaro, None)
+
+def test_rebalance_endpoint(api):
+    client, stream_id = api
+
+    response = client.post(
+        f"/api/streams/{stream_id}/rebalance"
+    )
+
+    assert response.status_code == 200
+
+    offers = response.json()["offers"]
+    assert sum(o["share"] for o in offers if not o["archived"]) == 100

@@ -298,3 +298,63 @@ def test_sync_preserves_dirty_draft_when_offer_reappears():
 
     db.close()
     engine.dispose()
+
+def test_sync_creates_new_stream_and_missing_offer():
+    engine, db, campaign, stream, missing_stream, binding = make_sync_db()
+
+    remote_streams = [
+        {
+            "id": 101,
+            "name": "Main stream",
+            "type": "regular",
+            "schema": "landings",
+            "offers": [],
+        },
+        {
+            "id": 303,
+            "name": "New stream",
+            "type": "regular",
+            "schema": "landings",
+            "offers": [
+                {
+                    "id": 701,
+                    "offer_id": 9999,
+                    "share": 100,
+                    "state": "active",
+                }
+            ],
+        },
+    ]
+
+    kc = make_client([], remote_streams)
+
+    asyncio.run(sync_campaign(db, kc, campaign))
+
+    new_stream = db.scalar(
+        select(Stream).where(Stream.keitaro_stream_id == 303)
+    )
+    assert new_stream is not None
+    assert new_stream.name == "New stream"
+
+    new_offer = db.scalar(
+        select(Offer).where(Offer.keitaro_offer_id == 9999)
+    )
+    assert new_offer is not None
+    assert new_offer.name == "Offer 9999"
+
+    new_binding = db.scalar(
+        select(StreamOffer).where(StreamOffer.stream_id == new_stream.id)
+    )
+    assert new_binding is not None
+    assert new_binding.draft_share == 100
+    assert new_binding.published_share == 100
+
+    history = db.scalars(
+        select(StreamOfferHistory).where(
+            StreamOfferHistory.action == "synced_new"
+        )
+    ).all()
+    assert len(history) == 1
+
+    db.close()
+    engine.dispose()

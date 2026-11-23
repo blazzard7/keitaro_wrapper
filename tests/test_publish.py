@@ -322,3 +322,42 @@ def test_publish_invalid_shares_preserves_draft():
 
     db.close()
     engine.dispose()
+
+def test_publish_db_commit_failure_returns_sync_warning(monkeypatch):
+    engine, session, stream, b1, b2 = make_db()
+
+    received_requests = []
+
+    async def handler(request):
+        received_requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "offers": [
+                    {"id": 501, "offer_id": 1001},
+                    {"id": 502, "offer_id": 1002},
+                ]
+            },
+        )
+
+    kc = KeitaroClient(
+        base_url="https://mock.keitaro",
+        api_key="test-key",
+        write_enabled=True,
+        transport=httpx.MockTransport(handler),
+    )
+
+    def fail_commit():
+        raise RuntimeError("simulated database failure")
+
+    monkeypatch.setattr(session, "commit", fail_commit)
+
+    result = asyncio.run(publish_stream(session, kc, stream))
+
+    assert len(received_requests) == 1
+    assert result["status"] == "error"
+    assert "Keitaro обновлён" in result["error"]
+    assert "Сделайте Sync" in result["error"]
+
+    session.close()
+    engine.dispose()

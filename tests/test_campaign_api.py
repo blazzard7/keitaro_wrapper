@@ -263,3 +263,35 @@ def test_create_campaign_sync_failure_can_be_recovered(api):
 
     assert recovered.status_code == 200
     assert len(recovered.json()["streams"]) == 2
+
+
+def test_publish_campaign_endpoint_unchanged(api):
+    client, fake = api
+
+    created = client.post(
+        "/api/campaigns",
+        json={
+            "name": "Publish test",
+            "geo": "AU",
+            "offer_id": 10,
+            "domain_id": 20,
+            "group_id": 30,
+            "traffic_source_id": 40,
+        },
+    )
+
+    assert created.status_code == 200
+    campaign_id = created.json()["id"]
+
+    response = client.post(
+        f"/api/campaigns/{campaign_id}/publish"
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["status"] == "unchanged"
+    assert all(
+        stream["status"] == "unchanged"
+        for stream in data["streams"]
+    )
