@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><title>Keitaro Wrapper</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--mut:#888;--bd:#ddd;--ok:#0a7d33;--err:#c0262d;--dirty:#fff6d6;--card:#fafafa}
+@media (prefers-color-scheme:dark){:root{--bg:#1b1b1d;--fg:#eee;--mut:#8b8b92;--bd:#3a3a40;--ok:#4cc27a;--err:#ff6b70;--dirty:#3b3418;--card:#232326}}
+body{font-family:system-ui,sans-serif;background:var(--bg);color:var(--fg);max-width:1000px;margin:24px auto;padding:0 16px}
+input,select,button{font:inherit;padding:6px 10px;border:1px solid var(--bd);border-radius:6px;background:var(--bg);color:var(--fg)}
+button{cursor:pointer}button.primary{background:#2563eb;color:#fff;border-color:#2563eb}
+button:disabled{opacity:.4;cursor:default}
+.card{border:1px solid var(--bd);background:var(--card);border-radius:8px;padding:14px;margin:12px 0}
+.card.dirty{background:var(--dirty)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0}
+label{display:block;margin:8px 0 2px;color:var(--mut);font-size:13px}
+table{width:100%;border-collapse:collapse;margin-top:8px}
+td,th{padding:6px;border-bottom:1px solid var(--bd);text-align:left}
+tr.archived td{color:var(--mut);opacity:.6}
+.tag{font-size:12px;border:1px solid var(--bd);border-radius:10px;padding:1px 8px;color:var(--mut)}
+#msg{min-height:22px;margin:8px 0;white-space:pre-wrap}.err{color:var(--err)}.ok{color:var(--ok)}
+.share{width:64px}
+</style></head><body>
+<h2>Keitaro Wrapper</h2>
+<div class="row">
+  <button onclick="show('create')">Новая кампания</button>
+  <button onclick="show('edit');loadList()">Кампании</button>
+</div>
+<div id="msg"></div>
+
+<div id="create" class="card">
+  <label>Название</label><input id="c_name" style="width:100%">
+  <label>GEO (код страны, например AU)</label><input id="c_geo" maxlength="2" style="width:80px">
+  <label>Оффер</label><div id="c_offer_box"></div>
+  <label>Домен</label><select id="c_domain" style="width:100%"></select>
+  <label>Группа</label><select id="c_group" style="width:100%"></select>
+  <label>Источник трафика</label><select id="c_source" style="width:100%"></select>
+  <div class="row"><button class="primary" onclick="createCampaign()">Create</button></div>
+</div>
+
+<div id="edit" style="display:none">
+  <div class="row">
+    <select id="e_list" onchange="openCampaign(this.value)"></select>
+    <input id="e_import" placeholder="ID кампании в Keitaro" style="width:190px">
+    <button onclick="importCampaign()">Подключить</button>
+    <button onclick="fetchStreams()">Fetch Streams</button>
+    <button id="pushAll" class="primary" onclick="pushAll()">Push all</button>
+  </div>
+  <div id="streams"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let current = null;
+
+function say(t, ok){ const m=$('msg'); m.textContent=t||''; m.className = ok?'ok':'err'; }
+async function api(url, method='GET', body){
+  const r = await fetch(url,{method,headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(j.detail || (Array.isArray(j.detail)?JSON.stringify(j.detail):r.statusText));
+  return j;
+}
+const guard = fn => async (...a) => { try{ await fn(...a) }catch(e){ say(e.message) } };
+function show(id){ $('create').style.display=id=='create'?'':'none'; $('edit').style.display=id=='edit'?'':'none'; say(''); }
+function opts(sel, items, label){ sel.replaceChildren(...items.map(i=>{const o=document.createElement('option');o.value=i.id;o.textContent=`${i.id} · ${label(i)}`;return o})); }
+function el(tag, props={}, ...kids){ const e=document.createElement(tag); Object.assign(e,props); kids.forEach(k=>e.append(k)); return e; }
+
+// Автокомплит офферов: поиск по ID или названию через наш API -> Keitaro
+function offerPicker(placeholder){
+  const input = el('input',{placeholder,style:'min-width:280px'});
+  const list = el('datalist',{id:'dl'+Math.random().toString(36).slice(2)});
+  input.setAttribute('list', list.id);
+  let found = {}, timer;
+  input.oninput = ()=>{
+    clearTimeout(timer);
+    timer = setTimeout(guard(async()=>{
+      const items = await api('/api/keitaro/offers?q='+encodeURIComponent(input.value.replace(/ ·.*/,'')));
+      found = {}; list.replaceChildren(...items.map(i=>{
+        const label = `${i.id} · ${i.name}`; found[label]=i.id; return el('option',{value:label});
+      }));
+    }), 250);
+  };
+  const value = ()=>{ const v = found[input.value] ?? parseInt(input.value); if(!v) throw new Error('Выберите оффер из списка (поиск по ID или названию)'); return v; };
+  const box = el('span',{}, input, list);
+  return {box, value, clear:()=>{input.value=''}};
+}
+const createPicker = offerPicker('поиск оффера по ID или названию');
+$('c_offer_box').append(createPicker.box);
+
+const init = guard(async ()=>{
+  const [d,g,s] = await Promise.all(['domains','groups','traffic-sources'].map(x=>api('/api/keitaro/'+x)));
+  opts($('c_domain'),d,i=>i.name); opts($('c_group'),g,i=>i.name); opts($('c_source'),s,i=>i.name);
+});
+init();
+
+const createCampaign = guard(async ()=>{
+  const c = await api('/api/campaigns','POST',{name:$('c_name').value,geo:$('c_geo').value,offer_id:createPicker.value(),
+    domain_id:+$('c_domain').value,group_id:+$('c_group').value,traffic_source_id:+$('c_source').value});
+  say(`Кампания создана (Keitaro ID ${c.keitaro_campaign_id})`, true);
+  await loadList(c.id);
+});
+
+const loadList = guard(async (select)=>{
+  const list = await api('/api/campaigns');
+  $('e_list').replaceChildren(...list.map(c=>{const o=el('option',{value:c.id,textContent:`${c.name} (#${c.keitaro_campaign_id})`});return o}));
+  show('edit');
+  const id = select || (list[0] && list[0].id);
+  if(id){ $('e_list').value=id; await openCampaign(id); } else $('streams').replaceChildren();
+});
+
+const fetchStreams = guard(async ()=>{ if(current) await openCampaign(current.id); });
+
+const importCampaign = guard(async ()=>{
+  const c = await api('/api/campaigns/import','POST',{keitaro_campaign_id:+$('e_import').value});
+  await loadList(c.id);
+});
+
+const openCampaign = guard(async (id)=>{ current = await api(`/api/campaigns/${id}`); render(); say('Синхронизировано с Keitaro',true); });
+
+function setStream(s){ const i=current.streams.findIndex(x=>x.id===s.id); current.streams[i]=s; render(); }
+const act = (fn) => guard(async ()=>{ setStream(await fn()); say(''); });
+
+function render(){
+  const box=$('streams'); box.replaceChildren();
+  $('pushAll').disabled = !current.streams.some(s=>s.dirty);
+  current.streams.forEach(s=>{
+    const card = el('div',{className:'card'+(s.dirty?' dirty':'')});
+    card.append(el('div',{className:'row'},
+      el('b',{textContent:`${s.name||'Stream'} `}), el('span',{className:'tag',textContent:s.type}),
+            s.dirty?el('span',{className:'tag',textContent:'есть неопубликованные изменения'}):'',
+      s.remote_deleted?el('span',{className:'tag err',textContent:'удалён в Keitaro'}):''));
+
+    if(s.offers===null){ card.append(el('div',{className:'row',style:'color:var(--mut)',textContent:'В потоке нет офферов'})); box.append(card); return; }
+
+    const t = el('table'); t.append(el('thead',{},el('tr',{},...['Оффер','Доля %','Закреп.','В Keitaro',''].map(h=>el('th',{textContent:h})))));
+    const tb = el('tbody');
+    s.offers.forEach(o=>{
+      const tr = el('tr',{className:o.archived?'archived':''});
+      tr.append(el('td',{textContent:`[${o.offer_id}] ${o.name}`}));
+      if(o.archived){
+        tr.append(el('td',{textContent:'0'}), el('td'), el('td',{textContent:o.in_keitaro?'да':'нет'}),
+          el('td',{},el('button',{textContent:'Bring back',onclick:act(()=>api(`/api/streams/${s.id}/offers/${o.offer_id}/restore`,'POST'))})));
+      } else {
+        const inp = el('input',{className:'share',type:'number',min:0,max:100,value:o.share,disabled:!o.is_pinned});
+        inp.onchange = act(()=>api(`/api/streams/${s.id}/offers/${o.offer_id}/pin`,'PUT',{pinned:true,share:+inp.value}));
+        const pin = el('input',{type:'checkbox',checked:o.is_pinned});
+        pin.onchange = act(()=>api(`/api/streams/${s.id}/offers/${o.offer_id}/pin`,'PUT',{pinned:pin.checked}));
+        tr.append(el('td',{},inp), el('td',{},pin), el('td',{textContent:o.in_keitaro?`да (${o.published_share}%)`:'нет'}),
+          el('td',{},el('button',{textContent:'✕',onclick:act(()=>api(`/api/streams/${s.id}/offers/${o.offer_id}`,'DELETE'))})));
+      }
+      tb.append(tr);
+    });
+    t.append(tb); card.append(t);
+
+    const pk = offerPicker('добавить оффер: ID или название');
+    card.append(el('div',{className:'row'}, pk.box,
+      el('button',{textContent:'Добавить оффер',onclick:act(()=>api(`/api/streams/${s.id}/offers`,'POST',{offer_id:pk.value()}))}),
+      el('button',{textContent:'Пересчитать',onclick:act(()=>api(`/api/streams/${s.id}/rebalance`,'POST'))}),
+      el('button',{textContent:'Cancel',disabled:!s.dirty,onclick:act(()=>api(`/api/streams/${s.id}/cancel`,'POST'))}),
+      el('button',{className:'primary',textContent:'Push to Keitaro',disabled:!s.dirty,onclick:guard(async()=>{
+        const r = await api(`/api/streams/${s.id}/publish`,'POST'); setStream(r.stream);
+        r.status==='error' ? say(r.error) : say('Опубликовано',true); })})));
+    box.append(card);
+  });
+}
+
+const pushAll = guard(async ()=>{
+  const r = await api(`/api/campaigns/${current.id}/publish`,'POST');
+  current = r.campaign; render();
+  const bad = r.streams.filter(x=>x.status==='error');
+  if(bad.length) say((r.status==='partial'?'Частично опубликовано.\n':'')+bad.map(b=>`${b.name}: ${b.error}`).join('\n'));
+  else say('Опубликовано',true);
+});
+</script></body></html>
