@@ -6,10 +6,11 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from app import db
 from app.errors import WriteDisabledError
 from app.keitaro.client import KeitaroClient
 from app.models import Base, Campaign, Offer, Stream, StreamOffer, StreamOfferHistory
-from app.services.publish import publish_stream
+from app.services.publish import publish_stream, publish_campaign
 
 
 def make_db():
@@ -240,6 +241,84 @@ def test_publish_archived_offer():
 
     history = db.scalars(select(StreamOfferHistory)).all()
     assert len(history) == 2
+
+    db.close()
+    engine.dispose()
+
+def test_publish_remote_deleted_stream():
+    engine, db, stream, b1, b2 = make_db()
+    stream.remote_deleted = True
+    db.commit()
+
+    result = asyncio.run(publish_campaign(db, None, stream.campaign))
+
+    assert result["status"] == "error"
+    assert result["streams"][0]["status"] == "error"
+    assert "удалён" in result["streams"][0]["error"]
+
+    db.close()
+    engine.dispose()
+
+
+def test_publish_unchanged_does_not_send_request():
+    engine, db, stream, b1, b2 = make_db()
+    b1.draft_share = 50
+    b2.draft_share = 50
+    db.commit()
+    received_requests = []
+
+    async def handler(request):
+        received_requests.append(request)
+        return httpx.Response(200, json={})
+
+    kc = KeitaroClient(
+        base_url="https://mock.keitaro",
+        api_key="test-key",
+        write_enabled=True,
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = asyncio.run(publish_stream(db, kc, stream))
+
+    assert result["status"] == "unchanged"
+    assert len(received_requests) == 0
+
+    db.close()
+    engine.dispose()
+
+
+def test_publish_invalid_shares_preserves_draft():
+    engine, db, stream, b1, b2 = make_db()
+    b1.draft_share = 70
+    b2.draft_share = 40
+    db.commit()
+
+    received_requests = []
+
+    async def handler(request):
+        received_requests.append(request)
+        return httpx.Response(200, json={})
+
+    kc = KeitaroClient(
+        base_url="https://mock.keitaro",
+        api_key="test-key",
+        write_enabled=True,
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = asyncio.run(publish_stream(db, kc, stream))
+
+    assert result["status"] == "error"
+    assert "110%" in result["error"]
+    assert len(received_requests) == 0
+
+    db.refresh(b1)
+    db.refresh(b2)
+
+    assert b1.draft_share == 70
+    assert b2.draft_share == 40
+    assert b1.published_share == 50
+    assert b2.published_share == 50
 
     db.close()
     engine.dispose()
