@@ -128,3 +128,4 @@ def get_campaign_or_404(db: Session, campaign_id: int) -> Campaign:
     if c is None:
         raise NotFoundError(f"Кампания {campaign_id} не найдена")
     return c
+
